@@ -8,10 +8,12 @@ import CheckoutModal from "./CheckoutModal";
 
 interface Props {
   image: string;
+  /** URL pública (Supabase) de la imagen, para el mensaje de WhatsApp */
+  imageUrl?: string | null;
   styleName: string;
 }
 
-export default function FramingSection({ image, styleName }: Props) {
+export default function FramingSection({ image, imageUrl, styleName }: Props) {
   const [optionId, setOptionId] = useState(FRAME_OPTIONS[1].id);
   const [checkout, setCheckout] = useState(false);
   const option = FRAME_OPTIONS.find((o) => o.id === optionId) as FrameOption;
@@ -91,7 +93,7 @@ export default function FramingSection({ image, styleName }: Props) {
         <Truck className="h-3.5 w-3.5" /> Envío $3 (San Salvador y La Libertad) · $4 resto del país · ¡GRATIS desde $30!
       </p>
 
-      <CheckoutModal open={checkout} onClose={() => setCheckout(false)} option={option} styleName={styleName} />
+      <CheckoutModal open={checkout} onClose={() => setCheckout(false)} option={option} styleName={styleName} imageUrl={imageUrl} />
     </section>
   );
 }

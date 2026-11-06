@@ -19,6 +19,7 @@ interface Props {
   onClose: () => void;
   option: FrameOption;
   styleName?: string;
+  imageUrl?: string | null;
 }
 
 const WHATSAPP = (process.env.NEXT_PUBLIC_WHATSAPP_NUMBER || "").replace(/\D/g, "");
@@ -31,7 +32,7 @@ export default function CheckoutModal({ open, ...rest }: Props) {
   return open ? <ModalBody {...rest} /> : null;
 }
 
-function ModalBody({ onClose, option, styleName }: Omit<Props, "open">) {
+function ModalBody({ onClose, option, styleName, imageUrl }: Omit<Props, "open">) {
   const [method, setMethod] = useState<MethodId>("card");
   const [status, setStatus] = useState<Status>("idle");
   const [form, setForm] = useState({ name: "", phone: "", depto: "", municipio: "", address: "", ref: "" });
@@ -90,6 +91,7 @@ function ModalBody({ onClose, option, styleName }: Omit<Props, "open">) {
       "¡Hola GuanacoPet AI! 🇸🇻 Quiero confirmar mi pedido:",
       "",
       `🎨 Estilo: ${styleName ?? "—"}`,
+      ...(imageUrl ? [`🖼️ Foto para el cuadro: ${imageUrl}`] : []),
       `🖼️ Cuadro: ${option.framed ? option.name : "Sin marco (impresión HD)"} (${option.size})`,
       `💵 Subtotal: ${usd(totals.subtotal)}`,
       `🚚 Envío: ${shipping}`,

@@ -23,6 +23,7 @@ export default function PetTransformer() {
   const [error, setError] = useState<string | null>(null);
   const [phase, setPhase] = useState<Phase>("edit");
   const [result, setResult] = useState<string | null>(null);
+  const [publicUrl, setPublicUrl] = useState<string | null>(null);
   const [genError, setGenError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const previewRef = useRef<string | null>(null);
@@ -40,6 +41,7 @@ export default function PetTransformer() {
     setError(null);
     setPhase("edit");
     setResult(null);
+    setPublicUrl(null);
     setGenError(null);
     if (previewRef.current) URL.revokeObjectURL(previewRef.current);
     const url = URL.createObjectURL(f);
@@ -78,6 +80,7 @@ export default function PetTransformer() {
       const data = await res.json().catch(() => ({}));
       if (!res.ok || !data.image) throw new Error(data.error || "Algo salió mal.");
       setResult(data.image);
+      setPublicUrl(data.publicUrl ?? null);
       setPhase("done");
       setTimeout(() => document.getElementById("resultado")?.scrollIntoView({ behavior: "smooth" }), 50);
     } catch (e) {
@@ -269,7 +272,7 @@ export default function PetTransformer() {
             <img src={result} alt="Tu mascota transformada" className="mx-auto mt-3 max-h-96 rounded-2xl object-contain" />
             <p className="mt-2 text-sm text-zinc-400">Estilo: {selected.name}</p>
           </section>
-          <FramingSection image={result} styleName={selected.name} />
+          <FramingSection image={result} imageUrl={publicUrl} styleName={selected.name} />
         </div>
       )}
     </div>

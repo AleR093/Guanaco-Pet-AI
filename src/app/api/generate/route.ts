@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { STYLES, type StyleId } from "@/data/styles";
+import { GENERATIONS_BUCKET, supabase } from "@/lib/supabase";
 
 export const maxDuration = 60;
 
@@ -33,7 +34,15 @@ const PROMPTS: Record<StyleId, string> = {
 };
 
 const SPECIES = new Set(["cat", "dog", "bird", "horse", "sheep", "cow", "bear"]);
+/** Instrucción inicial de fidelidad: va PRIMERO en el prompt de edición. */
+const fidelity = (animal: string) =>
+  `Exact same ${animal} from the input image, exact same breed, same fur color, markings and coat length, ` +
+  `same ear shape and size, same face features and proportions, same body proportions, ` +
+  `natural 4-legged quadruped position, all four paws on the ground or surface. ` +
+  `Do not replace it with a different breed or a different animal.`;
+
 const BASE_RULES =
+  "MANDATORY POSE: the animal sits on its haunches or stands on all four legs, with its body horizontal like a real pet in a photo; its front legs are normal animal legs, never raised or used like arms. " +
   "Keep the animal's real anatomy: a four-legged pet with its natural body and a natural resting or standing posture on all four legs. " +
   "Preserve the exact face shape, snout, ears, eyes, fur colors and markings of the animal in the original photo so it is clearly the same pet. " +
   "The animal stays an animal; the Salvadoran theme comes only from the small accessories and the scene. " +
@@ -50,6 +59,35 @@ const fail = (error: string, status: number) => NextResponse.json({ error }, { s
 const toDataUrl = (buf: ArrayBuffer, type: string) =>
   `data:${type};base64,${Buffer.from(buf).toString("base64")}`;
 
+/** Detecta el formato real por los primeros bytes (base64) en vez de asumirlo. */
+const sniffMime = (b64: string) =>
+  b64.startsWith("/9j/") ? "image/jpeg" : b64.startsWith("UklGR") ? "image/webp" : "image/png";
+
+const EXT: Record<string, string> = { "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp" };
+
+/**
+ * Sube la imagen generada al bucket público desde el SERVIDOR (clave secreta, nunca expuesta al cliente)
+ * y devuelve su URL pública, o null si no se pudo.
+ */
+async function saveToSupabase(dataUrl: string): Promise<string | null> {
+  if (!supabase) return null;
+  try {
+    const m = /^data:([^;]+);base64,(.+)$/.exec(dataUrl);
+    if (!m) return null;
+    const [, type, b64] = m;
+    const name = `pet_${Date.now()}_${crypto.randomUUID().slice(0, 8)}.${EXT[type] ?? "jpg"}`;
+    const { error } = await supabase.storage
+      .from(GENERATIONS_BUCKET)
+      .upload(name, Buffer.from(b64, "base64"), { contentType: type, upsert: false });
+    if (error) throw error;
+    return supabase.storage.from(GENERATIONS_BUCKET).getPublicUrl(name).data.publicUrl;
+  } catch (e) {
+    // No bloquear al usuario: ya tiene su imagen; solo faltará el link en WhatsApp.
+    console.error("[api/generate] supabase upload", e);
+    return null;
+  }
+}
+
 async function editWithPhoto(key: string, image: string, prompt: string, species: string) {
   const animal = species === "pet" ? "pet" : species;
   const res = await fetch("https://gen.pollinations.ai/v1/images/edits", {
@@ -57,16 +95,27 @@ async function editWithPhoto(key: string, image: string, prompt: string, species
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
     body: JSON.stringify({
       model: EDIT_MODEL,
-      prompt: `Edit this photo: keep the same ${animal} exactly as it is in the photo (same face, body and fur) and place it ${prompt}. ${BASE_RULES} ${NEGATIVE}`,
+      prompt: `${fidelity(animal)} Edit the input photo: keep this exact animal untouched, in a natural animal posture (not upright), and place it ${prompt}. ${BASE_RULES} ${NEGATIVE}`,
       image: [{ image_url: image }],
       n: 1,
+      size: "1024x1024",
+      seed: Math.floor(Math.random() * 2_147_483_647),
+      response_format: "b64_json",
     }),
     signal: AbortSignal.timeout(55_000),
   });
+  if (res.status === 401 || res.status === 403) {
+    console.error(
+      `[api/generate] POLLINATIONS_API_KEY inválida o sin permiso (HTTP ${res.status}). ` +
+        "Generá una clave nueva en https://enter.pollinations.ai y reiniciá el servidor. Respuesta: " +
+        (await res.text()).slice(0, 200),
+    );
+    throw new Error(`pollinations auth ${res.status}`);
+  }
   if (!res.ok) throw new Error(`pollinations edits ${res.status}: ${(await res.text()).slice(0, 300)}`);
   const json = await res.json();
   const item = json?.data?.[0];
-  if (item?.b64_json) return `data:image/png;base64,${item.b64_json}`;
+  if (item?.b64_json) return `data:${sniffMime(item.b64_json)};base64,${item.b64_json}`;
   if (typeof item?.url === "string") {
     const img = await fetch(item.url, { signal: AbortSignal.timeout(20_000) });
     if (img.ok) return toDataUrl(await img.arrayBuffer(), img.headers.get("content-type") || "image/png");
@@ -108,12 +157,20 @@ export async function POST(req: Request) {
   }
   const species = typeof body.species === "string" && SPECIES.has(body.species) ? body.species : "pet";
 
-  const key = process.env.POLLINATIONS_API_KEY;
+  const key = process.env.POLLINATIONS_API_KEY?.trim();
+  if (!key) {
+    console.error(
+      "[api/generate] POLLINATIONS_API_KEY no está definida (¿falta en .env.local o no reiniciaste `next dev`?). " +
+        "Usando el modo ANÓNIMO: NO usa la foto subida (inventa una mascota de la misma especie) y agrega marca de agua.",
+    );
+  }
   try {
     const result = key
       ? await editWithPhoto(key, image, PROMPTS[style.id], species)
       : await textOnly(species, PROMPTS[style.id], Math.floor(Math.random() * 1e6));
-    return NextResponse.json({ image: result, usedPhoto: !!key });
+    console.log(`[api/generate] modo=${key ? `edición con foto (${EDIT_MODEL})` : "anónimo (sin foto)"} estilo=${style.id}`);
+    const publicUrl = await saveToSupabase(result);
+    return NextResponse.json({ image: result, publicUrl, usedPhoto: !!key });
   } catch (e) {
     if (e instanceof Error && e.message === "rate-limit") {
       const wait = (e as Error & { wait?: string }).wait;
