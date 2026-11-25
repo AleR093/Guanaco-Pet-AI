@@ -5,14 +5,8 @@ import { GENERATIONS_BUCKET, supabase } from "@/lib/supabase";
 export const maxDuration = 60;
 
 /**
- * Generación con Pollinations.ai (sin Replicate, sin tarjeta).
- *
- * Modo A — con POLLINATIONS_API_KEY (clave gratis de https://enter.pollinations.ai):
- *   edición imagen→imagen (POST /v1/images/edits). Se envía la foto real de la mascota
- *   en base64 + el prompt del estilo, así que el resultado conserva a TU mascota.
- * Modo B — sin clave: API anónima (image.pollinations.ai, modelo "sana"). Solo acepta texto,
- *   así que la foto NO se usa; se genera una mascota de la misma especie. Límite del
- *   servicio: 1 imagen cada 45 s por IP (compartido por todos los visitantes).
+ * Generación con Fal.ai, modelo FLUX.1 Kontext [pro] (edición imagen→imagen, conserva al sujeto de la foto).
+ * REST síncrono: POST https://fal.run/{modelo} con la foto como data URI. Requiere FAL_KEY en .env.local.
  */
 
 /**
@@ -53,15 +47,11 @@ const NEGATIVE =
   "No humans in the scene, no text, no watermark.";
 const DATA_URL = /^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/=]+$/;
 const MAX_BYTES = 4 * 1024 * 1024;
-const EDIT_MODEL = process.env.POLLINATIONS_MODEL || "black-forest-labs/flux.2-klein-4b";
+const FAL_MODEL = "fal-ai/flux-pro/kontext";
 
 const fail = (error: string, status: number) => NextResponse.json({ error }, { status });
 const toDataUrl = (buf: ArrayBuffer, type: string) =>
   `data:${type};base64,${Buffer.from(buf).toString("base64")}`;
-
-/** Detecta el formato real por los primeros bytes (base64) en vez de asumirlo. */
-const sniffMime = (b64: string) =>
-  b64.startsWith("/9j/") ? "image/jpeg" : b64.startsWith("UklGR") ? "image/webp" : "image/png";
 
 const EXT: Record<string, string> = { "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp" };
 
@@ -88,56 +78,50 @@ async function saveToSupabase(dataUrl: string): Promise<string | null> {
   }
 }
 
-async function editWithPhoto(key: string, image: string, prompt: string, species: string) {
-  const animal = species === "pet" ? "pet" : species;
-  const res = await fetch("https://gen.pollinations.ai/v1/images/edits", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
-    body: JSON.stringify({
-      model: EDIT_MODEL,
-      prompt: `${fidelity(animal)} Edit the input photo: keep this exact animal untouched, in a natural animal posture (not upright), and place it ${prompt}. ${BASE_RULES} ${NEGATIVE}`,
-      image: [{ image_url: image }],
-      n: 1,
-      size: "1024x1024",
-      seed: Math.floor(Math.random() * 2_147_483_647),
-      response_format: "b64_json",
-    }),
-    signal: AbortSignal.timeout(55_000),
-  });
-  if (res.status === 401 || res.status === 403) {
-    console.error(
-      `[api/generate] POLLINATIONS_API_KEY inválida o sin permiso (HTTP ${res.status}). ` +
-        "Generá una clave nueva en https://enter.pollinations.ai y reiniciá el servidor. Respuesta: " +
-        (await res.text()).slice(0, 200),
-    );
-    throw new Error(`pollinations auth ${res.status}`);
+class FalError extends Error {
+  constructor(
+    message: string,
+    readonly status = 502,
+  ) {
+    super(message);
   }
-  if (!res.ok) throw new Error(`pollinations edits ${res.status}: ${(await res.text()).slice(0, 300)}`);
-  const json = await res.json();
-  const item = json?.data?.[0];
-  if (item?.b64_json) return `data:${sniffMime(item.b64_json)};base64,${item.b64_json}`;
-  if (typeof item?.url === "string") {
-    const img = await fetch(item.url, { signal: AbortSignal.timeout(20_000) });
-    if (img.ok) return toDataUrl(await img.arrayBuffer(), img.headers.get("content-type") || "image/png");
-  }
-  throw new Error("pollinations edits: respuesta sin imagen");
 }
 
-async function textOnly(species: string, prompt: string, seed: number) {
-  const text = `Cute illustration of a real ${species} with a natural ${species} body on four legs, ${species} face, fur and snout, ${prompt}. ${BASE_RULES} ${NEGATIVE}`;
-  const url =
-    `https://image.pollinations.ai/prompt/${encodeURIComponent(text)}` +
-    `?model=sana&width=768&height=768&nologo=true&seed=${seed}`;
-  const res = await fetch(url, { signal: AbortSignal.timeout(55_000) });
-  if (res.status === 402 || res.status === 429) {
-    const wait = /(\d+)s/.exec(await res.text())?.[1];
-    const e = new Error("rate-limit") as Error & { wait?: string };
-    e.wait = wait;
-    throw e;
+async function generateWithFal(key: string, image: string, prompt: string, species: string) {
+  const animal = species === "pet" ? "pet" : species;
+  let res: Response;
+  try {
+    res = await fetch(`https://fal.run/${FAL_MODEL}`, {
+      method: "POST",
+      headers: { Authorization: `Key ${key}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        prompt: `${fidelity(animal)} Edit the input photo: keep this exact animal untouched, in a natural animal posture (not upright), and place it ${prompt}. ${BASE_RULES} ${NEGATIVE}`,
+        image_url: image,
+        num_images: 1,
+        output_format: "jpeg",
+        seed: Math.floor(Math.random() * 2_147_483_647),
+      }),
+      signal: AbortSignal.timeout(55_000),
+    });
+  } catch (e) {
+    console.error("[api/generate] error de red con Fal.ai", e);
+    throw new FalError("No pudimos conectar con el servicio de IA. Intentá de nuevo.", 502);
   }
-  const type = res.headers.get("content-type") || "";
-  if (!res.ok || !type.startsWith("image/")) throw new Error(`pollinations anon ${res.status}`);
-  return toDataUrl(await res.arrayBuffer(), type);
+  if (!res.ok) {
+    const detail = (await res.text()).slice(0, 300);
+    console.error(`[api/generate] Fal.ai HTTP ${res.status}: ${detail}`);
+    if (res.status === 402 || /exhausted balance|insufficient|locked/i.test(detail)) {
+      throw new FalError("El servicio de IA está sin créditos en este momento. Intentá más tarde.", 503);
+    }
+    if (res.status === 401 || res.status === 403) throw new FalError("La FAL_KEY es inválida o no tiene permiso.", 503);
+    if (res.status === 429) throw new FalError("Hay mucha gente transformando bichos. Probá de nuevo en un minuto.", 429);
+    throw new FalError(`Fal.ai respondió HTTP ${res.status}.`);
+  }
+  const url: unknown = (await res.json())?.images?.[0]?.url;
+  if (typeof url !== "string") throw new FalError("Fal.ai terminó sin devolver imagen.");
+  const img = await fetch(url, { signal: AbortSignal.timeout(20_000) });
+  if (!img.ok) throw new FalError("No se pudo descargar la imagen generada.");
+  return toDataUrl(await img.arrayBuffer(), img.headers.get("content-type") || "image/jpeg");
 }
 
 export async function POST(req: Request) {
@@ -157,28 +141,19 @@ export async function POST(req: Request) {
   }
   const species = typeof body.species === "string" && SPECIES.has(body.species) ? body.species : "pet";
 
-  const key = process.env.POLLINATIONS_API_KEY?.trim();
+  const key = process.env.FAL_KEY?.trim();
+  console.log("FAL_KEY DETECTADA:", key ? "SI" : "NO");
   if (!key) {
-    console.error(
-      "[api/generate] POLLINATIONS_API_KEY no está definida (¿falta en .env.local o no reiniciaste `next dev`?). " +
-        "Usando el modo ANÓNIMO: NO usa la foto subida (inventa una mascota de la misma especie) y agrega marca de agua.",
-    );
+    console.error("[api/generate] FAL_KEY no está definida (¿falta en .env.local o no reiniciaste `next dev`?).");
+    return fail("El servicio de IA no está configurado todavía (falta FAL_KEY).", 503);
   }
   try {
-    const result = key
-      ? await editWithPhoto(key, image, PROMPTS[style.id], species)
-      : await textOnly(species, PROMPTS[style.id], Math.floor(Math.random() * 1e6));
-    console.log(`[api/generate] modo=${key ? `edición con foto (${EDIT_MODEL})` : "anónimo (sin foto)"} estilo=${style.id}`);
+    const result = await generateWithFal(key, image, PROMPTS[style.id], species);
+    console.log(`[api/generate] Fal.ai modelo=${FAL_MODEL} estilo=${style.id}`);
     const publicUrl = await saveToSupabase(result);
-    return NextResponse.json({ image: result, publicUrl, usedPhoto: !!key });
+    return NextResponse.json({ image: result, publicUrl, usedPhoto: true });
   } catch (e) {
-    if (e instanceof Error && e.message === "rate-limit") {
-      const wait = (e as Error & { wait?: string }).wait;
-      return fail(
-        `Hay mucha gente transformando bichos. Probá de nuevo${wait ? ` en ${wait} segundos` : " en un minuto"}.`,
-        429,
-      );
-    }
+    if (e instanceof FalError) return fail(e.message, e.status);
     console.error("[api/generate]", e);
     return fail("No pudimos transformar la foto. Intentá de nuevo.", 502);
   }
