@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { AlertTriangle, ImagePlus, Loader2, RefreshCw, ScanSearch, Zap } from "lucide-react";
 import { clsx } from "clsx";
 import FramingSection from "./FramingSection";
-import { STYLES } from "@/data/styles";
+import { STYLES, STYLE_GROUPS, type StyleGroup } from "@/data/styles";
 import { detectAnimal, toDataUrl } from "@/lib/petDetector";
 import { formatWait, MAX_TOKENS, useTokens } from "@/lib/tokens";
 
@@ -19,6 +19,7 @@ export default function PetTransformer() {
   const [species, setSpecies] = useState<string | null>(null);
   const [detect, setDetect] = useState<Detect>("idle");
   const [styleId, setStyleId] = useState<string | null>(null);
+  const [group, setGroup] = useState<StyleGroup>("petmorph");
   const [dragging, setDragging] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [phase, setPhase] = useState<Phase>("edit");
@@ -206,8 +207,30 @@ export default function PetTransformer() {
           <span className="grid h-7 w-7 place-items-center rounded-full bg-[#FFD100] text-sm text-zinc-900">2</span>
           Elegí el estilo
         </h3>
+        <div role="tablist" aria-label="Categorías de estilo" className="mb-3 flex gap-2">
+          {STYLE_GROUPS.map((g) => (
+            <button
+              key={g.id}
+              type="button"
+              role="tab"
+              aria-selected={g.id === group}
+              onClick={() => {
+                setGroup(g.id);
+                if (selected && selected.group !== g.id) setStyleId(null);
+              }}
+              className={clsx(
+                "flex-1 rounded-full border-2 px-4 py-2 text-sm font-extrabold transition active:scale-95",
+                g.id === group
+                  ? "border-[#FFD100] bg-[#FFD100] text-zinc-900"
+                  : "border-zinc-800 bg-zinc-900 text-zinc-300 hover:border-zinc-600",
+              )}
+            >
+              {g.label}
+            </button>
+          ))}
+        </div>
         <div role="radiogroup" aria-labelledby="step-2" className="grid grid-cols-2 gap-3 md:grid-cols-3">
-          {STYLES.map((s) => {
+          {STYLES.filter((s) => s.group === group).map((s) => {
             const active = s.id === styleId;
             return (
               <button
